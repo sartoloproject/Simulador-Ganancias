@@ -1,6 +1,7 @@
 name = "simulador-ganancias-api"
 main = "src/index.ts"
 compatibility_date = "2026-09-01"
+preview_urls = false
 
 [[d1_databases]]
 binding = "DB"
