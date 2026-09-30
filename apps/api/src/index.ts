@@ -72,6 +72,15 @@ app.get('/api/liquidaciones', async c => {
   return c.json(results);
 });
 
+app.get('/api/categorias', async c => c.json((await c.env.DB.prepare('SELECT id,nombre,tratamiento FROM categorias ORDER BY id').all()).results));
+
+app.patch('/api/liquidaciones/:id', async c => {
+  const b = await c.req.json<{ fecha_cobro?: string | null; ubicacion?: string | null }>();
+  await c.env.DB.prepare('UPDATE liquidaciones_granos SET fecha_cobro=?, ubicacion=COALESCE(?,ubicacion) WHERE id=?')
+    .bind(b.fecha_cobro || null, b.ubicacion ?? null, c.req.param('id')).run();
+  return c.json({ ok: true });
+});
+
 // ---------- Parámetros fiscales por año ----------
 app.put('/api/parametros/:anio/:clave', async c => {
   const valor = await c.req.json();
