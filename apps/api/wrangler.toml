@@ -11,3 +11,5 @@ migrations_dir = "../../db/migrations"
 [vars]
 # CUIT propio: se usa para distinguir comprador/vendedor en las liquidaciones
 CUIT_PROPIO = "20184558131"
+[assets]
+directory = "./public"
