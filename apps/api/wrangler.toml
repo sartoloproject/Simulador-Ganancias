@@ -1,0 +1,13 @@
+name = "simulador-ganancias-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "simulador-ganancias"
+database_id = "REEMPLAZAR_CON_EL_ID_QUE_DEVUELVE_wrangler_d1_create"
+migrations_dir = "../../db/migrations"
+
+[vars]
+# CUIT propio: se usa para distinguir comprador/vendedor en las liquidaciones
+CUIT_PROPIO = "REEMPLAZAR"
