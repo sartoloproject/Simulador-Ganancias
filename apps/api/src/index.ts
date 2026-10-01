@@ -2,6 +2,8 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { parseComprobantes } from './parsers/comprobantes.ts';
 import { parseLiquidacion } from './parsers/liquidacion.ts';
+import { calcularAnual, type Entrada, type Parametros } from './engine/anual.ts';
+import { P2026 } from './parametros/2026.ts';
 import { calcularGanancias, simular, type EntradaGanancias } from './engine/ganancias.ts';
 
 type Env = { Bindings: { DB: D1Database; CUIT_PROPIO: string } };
@@ -151,6 +153,85 @@ app.post('/api/simular', async c => {
   const ajustes = await c.req.json();
   const { entrada } = await armarEntrada(c.env.DB, anio);
   return c.json(simular(entrada, ajustes));
+});
+
+// ---------- Motor anual (v0.3) ----------
+async function entradaAnual(db: D1Database, anio: number): Promise<{ e: Entrada; p: Parametros }> {
+  const [d, h] = rango(anio);
+  const one = async (sql: string, ...b: unknown[]) => (await db.prepare(sql).bind(...b).first<{ v: number | null }>())?.v ?? 0;
+  const pr = await db.prepare("SELECT valor_json v FROM parametros_fiscales WHERE anio=? AND clave='tablas'").bind(anio).first<{ v: string }>();
+  const p: Parametros | null = pr ? JSON.parse(pr.v) : anio === 2026 ? P2026 : null;
+  if (!p) throw new Error(`Faltan las tablas fiscales ${anio} (clave "tablas" en parametros_fiscales)`);
+  const cfg = await db.prepare('SELECT * FROM config_personal WHERE anio=?').bind(anio).first<any>();
+  const a = (await db.prepare('SELECT * FROM ajustes_anuales WHERE anio=?').bind(anio).first<any>()) ?? {};
+  const gen = (await db.prepare('SELECT concepto, SUM(monto) m FROM deducciones_generales WHERE anio=? GROUP BY concepto').bind(anio).all<any>()).results;
+  const ing = await one('SELECT SUM(subtotal) v FROM liquidaciones_granos WHERE fecha_cobro BETWEEN ? AND ?', d, h);
+  const gLiq = await one('SELECT SUM(comision+sellos+registro) v FROM liquidaciones_granos WHERE fecha_cobro BETWEEN ? AND ?', d, h);
+  const gComp = await one(`SELECT SUM(c.neto_ars*c.pct_afectado/100) v FROM comprobantes c JOIN categorias k ON k.id=c.categoria_id
+    WHERE c.deducible=1 AND k.tratamiento='gasto_deducible' AND COALESCE(c.categoria_ganancias,3)=3 AND c.fecha_pago BETWEEN ? AND ?`, d, h);
+  const amort = await one(`SELECT SUM(valor_origen/vida_util_anios*pct_afectado/100) v FROM bienes_uso
+    WHERE CAST(substr(fecha_alta,1,4) AS INT)<=? AND CAST(substr(fecha_alta,1,4) AS INT)+vida_util_anios>?
+    AND (fecha_baja IS NULL OR CAST(substr(fecha_baja,1,4) AS INT)>=?)`, anio, anio, anio);
+  const queb = await one('SELECT SUM(monto-usado) v FROM quebrantos WHERE categoria=3 AND anio_origen BETWEEN ? AND ?', anio - 5, anio - 1);
+  const ret = await one('SELECT SUM(ret_ganancias) v FROM liquidaciones_granos WHERE fecha_cobro BETWEEN ? AND ?', d, h);
+  const e: Entrada = {
+    c3: { ingresos: ing, gastos: gLiq + gComp, amortizaciones: amort, ajusteExistencias: a.ajuste_existencias ?? 0, ajusteInflacion: a.ajuste_inflacion ?? 0, quebrantos: queb },
+    c1: { ingresos: a.ingresos_1ra ?? 0, gastos: a.gastos_1ra ?? 0, presuncionPct: a.presuncion_1ra_pct ?? undefined },
+    c2: a.neto_2da ?? 0, c4: a.neto_4ta ?? 0,
+    generales: Object.fromEntries(gen.map((g: any) => [g.concepto, g.m])),
+    personales: { conyuge: !!cfg?.conyuge, hijos: cfg?.hijos ?? 0, hijosIncap: cfg?.hijos_incapacitados ?? 0, dedEspecial: cfg?.ded_especial ?? 'ninguna' },
+    cedular: a.cedular ?? 0,
+    pagos: { retenciones: ret, anticipos: a.anticipos ?? 0, debCred: a.deb_cred ?? 0, saldoFavor: a.saldo_favor ?? 0 },
+  };
+  return { e, p };
+}
+
+app.get('/api/anual', async c => {
+  const anio = anioQ(c.req.query('anio'));
+  const { e, p } = await entradaAnual(c.env.DB, anio);
+  const sc = await c.env.DB.prepare('SELECT COUNT(*) n FROM comprobantes WHERE deducible IS NULL AND fecha BETWEEN ? AND ?').bind(...rango(anio)).first<{ n: number }>();
+  return c.json({ entrada: e, resultado: calcularAnual(e, p), sinClasificar: sc?.n ?? 0 });
+});
+
+app.post('/api/anual/simular', async c => {
+  const anio = anioQ(c.req.query('anio'));
+  const b = await c.req.json<{ ingresos3ra?: number; gastos3ra?: number }>();
+  const { e, p } = await entradaAnual(c.env.DB, anio);
+  const s = structuredClone(e);
+  s.c3.ingresos += Number(b.ingresos3ra) || 0; s.c3.gastos += Number(b.gastos3ra) || 0;
+  return c.json({ real: calcularAnual(e, p), simulado: calcularAnual(s, p) });
+});
+
+app.get('/api/config/:anio', async c => {
+  const anio = anioQ(c.req.param('anio')), db = c.env.DB;
+  const cfg = await db.prepare('SELECT * FROM config_personal WHERE anio=?').bind(anio).first();
+  const aj = await db.prepare('SELECT * FROM ajustes_anuales WHERE anio=?').bind(anio).first();
+  const gen = (await db.prepare('SELECT concepto, SUM(monto) m FROM deducciones_generales WHERE anio=? GROUP BY concepto').bind(anio).all<any>()).results;
+  const q = await db.prepare('SELECT SUM(monto) v FROM quebrantos WHERE anio_origen=? AND categoria=3').bind(anio - 1).first<{ v: number | null }>();
+  return c.json({ cfg, aj, generales: Object.fromEntries(gen.map((g: any) => [g.concepto, g.m])), quebrantos: q?.v ?? 0 });
+});
+
+app.put('/api/config/:anio', async c => {
+  const anio = anioQ(c.req.param('anio')), db = c.env.DB, n = (v: unknown) => Number(v) || 0;
+  const b = await c.req.json<any>();
+  const ded = ['ninguna', 'ap1', 'ap1Nuevos', 'ap2'].includes(b.cfg?.ded_especial) ? b.cfg.ded_especial : 'ninguna';
+  const j = b.aj ?? {};
+  const st = [
+    db.prepare('INSERT OR REPLACE INTO config_personal (anio,conyuge,hijos,hijos_incapacitados,ded_especial) VALUES (?,?,?,?,?)')
+      .bind(anio, b.cfg?.conyuge ? 1 : 0, n(b.cfg?.hijos), n(b.cfg?.hijos_incapacitados), ded),
+    db.prepare(`INSERT OR REPLACE INTO ajustes_anuales (anio,ajuste_existencias,ajuste_inflacion,ingresos_1ra,gastos_1ra,presuncion_1ra_pct,
+      neto_2da,neto_4ta,cedular,anticipos,deb_cred,saldo_favor) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(anio, n(j.ajuste_existencias), n(j.ajuste_inflacion), n(j.ingresos_1ra), n(j.gastos_1ra),
+        j.presuncion_1ra_pct === '' || j.presuncion_1ra_pct == null ? null : n(j.presuncion_1ra_pct),
+        n(j.neto_2da), n(j.neto_4ta), n(j.cedular), n(j.anticipos), n(j.deb_cred), n(j.saldo_favor)),
+    db.prepare('DELETE FROM deducciones_generales WHERE anio=?').bind(anio),
+    db.prepare('DELETE FROM quebrantos WHERE anio_origen=? AND categoria=3').bind(anio - 1),
+  ];
+  for (const [k, v] of Object.entries(b.generales ?? {}))
+    if (n(v) > 0) st.push(db.prepare('INSERT INTO deducciones_generales (anio,concepto,monto) VALUES (?,?,?)').bind(anio, k, n(v)));
+  if (n(b.quebrantos) > 0) st.push(db.prepare('INSERT INTO quebrantos (anio_origen,categoria,monto) VALUES (?,3,?)').bind(anio - 1, n(b.quebrantos)));
+  await db.batch(st);
+  return c.json({ ok: true });
 });
 
 app.onError((e, c) => c.json({ error: e.message }, 400));
