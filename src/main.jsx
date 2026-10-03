@@ -1,7 +1,7 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import CategorizationTable from './CategorizationTable.jsx'
 import './index.css'
+import CategorizationTable from './CategorizationTable.jsx'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
