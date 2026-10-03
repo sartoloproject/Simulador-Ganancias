@@ -159,7 +159,7 @@ export default function CategorizationTable() {
                       </td>
                       <td className="py-3 px-4 text-gray-500 whitespace-nowrap">{item.date}</td>
                       <td className="py-3 px-4 font-medium text-gray-900">{item.name}</td>
-                      <td className="py-3 px-4 text-right font-mono font-semibold text-gray-900">\${item.amount.toFixed(2)}</td>
+                      <td className="py-3 px-4 text-right font-mono font-semibold text-gray-900">${item.amount.toFixed(2)}</td>
                       <td className="py-3 px-4 pl-8">
                         <select
                           value={item.currentCategory}
